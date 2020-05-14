@@ -68,7 +68,7 @@
   }
 
   $(function () {
-    $('.django-select2').djangoSelect2()
+    $('.django-select2').not('[name*=__prefix__]').djangoSelect2()
   })
 
   return $.fn.djangoSelect2
