@@ -3,9 +3,20 @@ import json
 from django.http import HttpResponse
 from django.views.generic import FormView
 
+from .models import Product
+
 
 class TemplateFormView(FormView):
     template_name = "form.html"
+
+
+class SearchView(FormView):
+    template_name = "form.html"
+
+    def get_initial(self):
+        initial = super().get_initial()
+        initial["product"] = self.request.GET.get("product_id")
+        return initial
 
 
 def heavy_data_1(request):

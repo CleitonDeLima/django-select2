@@ -6,9 +6,10 @@ from .forms import (
     HeavySelect2MultipleWidgetForm,
     HeavySelect2WidgetForm,
     ModelSelect2TagWidgetForm,
+    ProductSearchForm,
     Select2WidgetForm,
 )
-from .views import TemplateFormView, heavy_data_1, heavy_data_2
+from .views import SearchView, TemplateFormView, heavy_data_1, heavy_data_2
 
 urlpatterns = [
     path(
@@ -42,6 +43,11 @@ urlpatterns = [
         "model_chained_select2_widget",
         TemplateFormView.as_view(form_class=AddressChainedSelect2WidgetForm),
         name="model_chained_select2_widget",
+    ),
+    path(
+        "invalid_uuid_select2_widget",
+        SearchView.as_view(form_class=ProductSearchForm),
+        name="invalid_uuid_select2_widget",
     ),
     path("heavy_data_1", heavy_data_1, name="heavy_data_1"),
     path("heavy_data_2", heavy_data_2, name="heavy_data_2"),

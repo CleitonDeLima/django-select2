@@ -5,7 +5,7 @@ from django.utils.encoding import smart_str
 from django_select2.cache import cache
 from django_select2.forms import ModelSelect2Widget
 from tests.testapp.forms import AlbumModelSelect2WidgetForm, ArtistCustomTitleWidget
-from tests.testapp.models import Genre
+from tests.testapp.models import Genre, Product
 
 try:
     from django.urls import reverse
@@ -96,3 +96,10 @@ class TestAutoResponseView:
         url = reverse("django_select2:auto-json")
         response = client.get(url, {"field_id": field_id, "term": artist.title})
         assert response.status_code == 404
+
+
+class TestRenderExampleView:
+    def test_get(self, db, client):
+        url = reverse("invalid_uuid_select2_widget")
+        response = client.get(url, {"product_id": "invalid-uuid"})
+        assert response.context["form"].fields["product"].queryset.count() == 0

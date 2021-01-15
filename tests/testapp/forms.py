@@ -11,7 +11,7 @@ from django_select2.forms import (
     Select2Widget,
 )
 from tests.testapp import models
-from tests.testapp.models import Album, City, Country
+from tests.testapp.models import Album, City, Country, Product
 
 
 class TitleSearchFieldMixin:
@@ -226,3 +226,10 @@ class GroupieForm(forms.ModelForm):
         model = models.Groupie
         fields = "__all__"
         widgets = {"obsession": ArtistCustomTitleWidget}
+
+
+class ProductSearchForm(forms.Form):
+    product = forms.ModelChoiceField(
+        queryset=Product.objects.all(),
+        widget=ModelSelect2Widget(search_fields=["name"]),
+    )
