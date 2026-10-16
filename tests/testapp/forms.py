@@ -181,7 +181,8 @@ class HeavySelect2MultipleWidgetForm(forms.Form):
 
     def clean_title(self):
         if len(self.cleaned_data["title"]) < 3:
-            raise forms.ValidationError("Title must have more than 3 characters.")
+            msg = "Title must have more than 3 characters."
+            raise forms.ValidationError(msg)
         return self.cleaned_data["title"]
 
 
@@ -209,7 +210,7 @@ class AddressChainedSelect2WidgetForm(forms.Form):
         label="City",
         widget=ModelSelect2Widget(
             search_fields=["name__icontains"],
-            dependent_fields={"country": "country"},
+            dependent_fields={"country": "country", "active": "active"},
             max_results=500,
             attrs={"data-minimum-input-length": 0},
         ),
@@ -225,6 +226,8 @@ class AddressChainedSelect2WidgetForm(forms.Form):
             attrs={"data-minimum-input-length": 0},
         ),
     )
+
+    active = forms.BooleanField(required=False, initial=True)
 
 
 class GroupieForm(forms.ModelForm):

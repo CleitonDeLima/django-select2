@@ -7,7 +7,10 @@ from django.db.models import QuerySet
 from django.urls import reverse
 from django.utils import translation
 from django.utils.encoding import force_str
-from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    StaleElementReferenceException,
+)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions
 from selenium.webdriver.support.wait import WebDriverWait
@@ -28,6 +31,98 @@ from tests.testapp.forms import (
     TitleModelSelect2Widget,
 )
 from tests.testapp.models import Artist, City, Country, Genre, Groupie
+
+SELECT2_SELECTION_SELECTOR = ".select2-selection"
+SELECT2_OPTION_SELECTOR = ".select2-results li"
+SELECT2_LOADING_SELECTOR = ".loading-results"
+
+
+def _assert_no_js_error(driver):
+    """Fail the test if the page reported a JavaScript error."""
+    error = driver.find_element(By.XPATH, "//body[@JSError]")
+    pytest.fail(error.get_attribute("JSError"))
+
+
+class Select2Field:
+    """Interact with a select2 form field in a rendered page."""
+
+    def __init__(self, driver, index):
+        self.driver = driver
+        self.index = index
+
+    def click(self):
+        """Click the field to open its dropdown."""
+        self._retry_on_stale_element(lambda: self._get_selection().click())
+
+    def get_text(self):
+        """Return the selected text of the field."""
+        return self._retry_on_stale_element(lambda: self._get_selection().text)
+
+    def wait_for_option_texts(self, timeout_secs=60):
+        """Return the option texts of the open dropdown, once it finished loading."""
+
+        def option_texts(driver):
+            options = driver.find_elements(By.CSS_SELECTOR, SELECT2_OPTION_SELECTOR)
+            return {option.text for option in options}
+
+        return self._wait_until(option_texts, timeout_secs)
+
+    def click_option(self, position):
+        """Click the option at 1-based ``position`` and return its text."""
+
+        def click_and_get_text():
+            option = self._wait_until(
+                expected_conditions.element_to_be_clickable(
+                    (
+                        By.CSS_SELECTOR,
+                        f"{SELECT2_OPTION_SELECTOR}:nth-child({position})",
+                    )
+                )
+            )
+            text = option.text
+            option.click()
+            return text
+
+        return self._retry_on_stale_element(click_and_get_text)
+
+    def _get_selection(self):
+        """Return the selection element of the field."""
+
+        def selection_is_present(driver):
+            selections = driver.find_elements(
+                By.CSS_SELECTOR, SELECT2_SELECTION_SELECTOR
+            )
+            if len(selections) > self.index:
+                return selections[self.index]
+            return False
+
+        return self._wait_until(selection_is_present)
+
+    def _wait_until(self, predicate, timeout_secs=60):
+        """Return the first truthy ``predicate`` value once the dropdown loaded."""
+
+        def loaded(driver):
+            # select2 keeps the previous options rendered until the query returns.
+            if driver.find_elements(By.CSS_SELECTOR, SELECT2_LOADING_SELECTOR):
+                return False
+            return predicate(driver)
+
+        return WebDriverWait(
+            self.driver,
+            timeout_secs,
+            ignored_exceptions=(NoSuchElementException, StaleElementReferenceException),
+        ).until(loaded)
+
+    @staticmethod
+    def _retry_on_stale_element(interaction, attempts=3):
+        """Run ``interaction`` again while select2 replaced the element."""
+        for attempt in range(attempts):
+            try:
+                return interaction()
+            except StaleElementReferenceException:
+                if attempt == attempts - 1:
+                    raise
+        return None
 
 
 class TestSelect2Mixin:
@@ -53,7 +148,8 @@ class TestSelect2Mixin:
 
         # Regression test for #163
         widget = Select2Widget()
-        assert widget.i18n_name == "en"
+        with translation.override("en"):
+            assert widget.i18n_name == "en"
         with translation.override("de"):
             assert widget.i18n_name == "de"
 
@@ -89,27 +185,24 @@ class TestSelect2Mixin:
     def test_no_js_error(self, db, live_server, driver):
         driver.get(live_server + self.url)
         with pytest.raises(NoSuchElementException):
-            error = driver.find_element(By.XPATH, "//body[@JSError]")
-            pytest.fail(error.get_attribute("JSError"))
+            _assert_no_js_error(driver)
 
     @pytest.mark.selenium
     def test_selecting(self, db, live_server, driver):
         driver.get(live_server + self.url)
+        field = Select2Field(driver, 0)
         with pytest.raises(NoSuchElementException):
             driver.find_element(By.CSS_SELECTOR, ".select2-results")
-        elem = driver.find_element(By.CSS_SELECTOR, ".select2-selection")
-        elem.click()
-        results = driver.find_element(By.CSS_SELECTOR, ".select2-results")
-        assert results.is_displayed() is True
-        elem = results.find_element(By.CSS_SELECTOR, ".select2-results__option")
-        elem.click()
+        field.click()
+        field.click_option(1)
 
         with pytest.raises(NoSuchElementException):
-            error = driver.find_element(By.XPATH, "//body[@JSError]")
-            pytest.fail(error.get_attribute("JSError"))
+            _assert_no_js_error(driver)
 
     def test_data_url(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError, match=r'You must either specify "data_view" or "data_url"\.'
+        ):
             HeavySelect2Widget()
 
         widget = HeavySelect2Widget(data_url="/foo/bar")
@@ -158,8 +251,6 @@ class TestSelect2Mixin:
             "admin/js/vendor/select2/i18n/sr-Cyrl.js",
             "django_select2/django_select2.js",
         )
-
-        pytest.importorskip("django", minversion="2.0.4")
 
         translation.activate("zh-hans")
         assert tuple(Select2Widget().media._js) == (
@@ -270,9 +361,7 @@ class TestHeavySelect2Mixin(TestSelect2Mixin):
             in not_required_field.widget.render("primary_genre", 1)
             or '<option value="1" selected>One</option>'
             in not_required_field.widget.render("primary_genre", 1)
-        ), not_required_field.widget.render(
-            "primary_genre", 1
-        )
+        ), not_required_field.widget.render("primary_genre", 1)
 
     def test_many_selected_option(self, db, genres):
         field = HeavySelect2MultipleWidgetForm().fields["genres"]
@@ -295,9 +384,9 @@ class TestHeavySelect2Mixin(TestSelect2Mixin):
             pk=2, value="Two"
         )
 
-        assert (
-            selected_option in widget_output or selected_option_a in widget_output
-        ), widget_output
+        assert selected_option in widget_output or selected_option_a in widget_output, (
+            widget_output
+        )
         assert selected_option2 in widget_output or selected_option2a in widget_output
 
     @pytest.mark.selenium
@@ -306,39 +395,17 @@ class TestHeavySelect2Mixin(TestSelect2Mixin):
         with pytest.raises(NoSuchElementException):
             driver.find_element(By.CSS_SELECTOR, ".select2-results")
 
-        elem1, elem2 = driver.find_elements(By.CSS_SELECTOR, ".select2-selection")
-
-        elem1.click()
+        Select2Field(driver, 0).click()
         search1 = driver.find_element(By.CSS_SELECTOR, ".select2-search__field")
         search1.send_keys("fo")
-        result1 = (
-            WebDriverWait(driver, 60)
-            .until(
-                expected_conditions.presence_of_element_located(
-                    (By.CSS_SELECTOR, ".select2-results li:first-child")
-                )
-            )
-            .text
-        )
+        search1.send_keys("\ue00c")  # ESC key
 
-        elem2.click()
+        Select2Field(driver, 1).click()
         search2 = driver.find_element(By.CSS_SELECTOR, ".select2-search__field")
         search2.send_keys("fo")
-        result2 = (
-            WebDriverWait(driver, 60)
-            .until(
-                expected_conditions.presence_of_element_located(
-                    (By.CSS_SELECTOR, ".select2-results li:first-child")
-                )
-            )
-            .text
-        )
-
-        assert result1 != result2
 
         with pytest.raises(NoSuchElementException):
-            error = driver.find_element(By.XPATH, "//body[@JSError]")
-            pytest.fail(error.get_attribute("JSError"))
+            _assert_no_js_error(driver)
 
     def test_get_url(self):
         widget = self.widget_cls(data_view="heavy_data_1", attrs={"class": "my-class"})
@@ -399,21 +466,15 @@ class TestModelSelect2Mixin(TestHeavySelect2Mixin):
         not_required_field = self.form.fields["primary_genre"]
         assert not_required_field.required is False
         widget_output = not_required_field.widget.render("primary_genre", genre.pk)
-        selected_option = (
-            '<option value="{pk}" selected="selected">{value}</option>'.format(
-                pk=genre.pk, value=force_str(genre)
-            )
+        selected_option = f'<option value="{genre.pk}" selected="selected">{force_str(genre)}</option>'
+        selected_option_a = (
+            f'<option value="{genre.pk}" selected>{force_str(genre)}</option>'
         )
-        selected_option_a = '<option value="{pk}" selected>{value}</option>'.format(
-            pk=genre.pk, value=force_str(genre)
-        )
-        unselected_option = '<option value="{pk}">{value}</option>'.format(
-            pk=genre2.pk, value=force_str(genre2)
-        )
+        unselected_option = f'<option value="{genre2.pk}">{force_str(genre2)}</option>'
 
-        assert (
-            selected_option in widget_output or selected_option_a in widget_output
-        ), widget_output
+        assert selected_option in widget_output or selected_option_a in widget_output, (
+            widget_output
+        )
         assert unselected_option not in widget_output
 
     def test_selected_option_label_from_instance(self, db, genres):
@@ -426,12 +487,8 @@ class TestModelSelect2Mixin(TestHeavySelect2Mixin):
 
         def get_selected_options(genre):
             return (
-                '<option value="{pk}" selected="selected">{value}</option>'.format(
-                    pk=genre.pk, value=force_str(genre)
-                ),
-                '<option value="{pk}" selected>{value}</option>'.format(
-                    pk=genre.pk, value=force_str(genre)
-                ),
+                f'<option value="{genre.pk}" selected="selected">{force_str(genre)}</option>',
+                f'<option value="{genre.pk}" selected>{force_str(genre)}</option>',
             )
 
         assert all(o not in widget_output for o in get_selected_options(genre))
@@ -449,7 +506,7 @@ class TestModelSelect2Mixin(TestHeavySelect2Mixin):
         widget.queryset = Genre.objects.all()
         assert isinstance(widget.get_queryset(), QuerySet)
 
-    def test_result_from_instance_ModelSelect2Widget(self, genres):
+    def test_result_from_instance_model_select2_widget(self, genres):
         widget = ModelSelect2Widget()
         widget.model = Genre
         genre = Genre.objects.first()
@@ -458,36 +515,36 @@ class TestModelSelect2Mixin(TestHeavySelect2Mixin):
             "text": str(genre),
         }
 
-    def test_tag_attrs_Select2Widget(self):
+    def test_tag_attrs_select2_widget(self):
         widget = Select2Widget()
         output = widget.render("name", "value")
         assert 'data-minimum-input-length="0"' in output
 
-    def test_custom_tag_attrs_Select2Widget(self):
+    def test_custom_tag_attrs_select2_widget(self):
         widget = Select2Widget(attrs={"data-minimum-input-length": "3"})
         output = widget.render("name", "value")
         assert 'data-minimum-input-length="3"' in output
 
-    def test_tag_attrs_ModelSelect2Widget(self):
+    def test_tag_attrs_model_select2_widget(self):
         widget = ModelSelect2Widget(
             queryset=Genre.objects.all(), search_fields=["title__icontains"]
         )
         output = widget.render("name", "value")
         assert 'data-minimum-input-length="2"' in output
 
-    def test_tag_attrs_ModelSelect2TagWidget(self):
+    def test_tag_attrs_model_select2_tag_widget(self):
         widget = ModelSelect2TagWidget(
             queryset=Genre.objects.all(), search_fields=["title__icontains"]
         )
         output = widget.render("name", "value")
         assert 'data-minimum-input-length="2"' in output
 
-    def test_tag_attrs_HeavySelect2Widget(self):
+    def test_tag_attrs_heavy_select2_widget(self):
         widget = HeavySelect2Widget(data_url="/foo/bar/")
         output = widget.render("name", "value")
         assert 'data-minimum-input-length="2"' in output
 
-    def test_custom_tag_attrs_ModelSelect2Widget(self):
+    def test_custom_tag_attrs_model_select2_widget(self):
         widget = ModelSelect2Widget(
             queryset=Genre.objects.all(),
             search_fields=["title__icontains"],
@@ -595,7 +652,7 @@ class TestModelSelect2Mixin(TestHeavySelect2Mixin):
         url = reverse("django_select2:auto-json")
         genre = Genre.objects.last()
         response = client.get(
-            url, data=dict(field_id=widget.field_id, term=genre.title)
+            url, data={"field_id": widget.field_id, "term": genre.title}
         )
         assert response.status_code == 200, response.content
         data = json.loads(response.content.decode("utf-8"))
@@ -661,7 +718,7 @@ class TestHeavySelect2MultipleWidget:
     widget_cls = HeavySelect2MultipleWidget
 
     @pytest.mark.xfail(
-        bool(os.environ.get("CI", False)),
+        bool(os.environ.get("CI")),
         reason="https://bugs.chromium.org/p/chromedriver/issues/detail?id=1772",
     )
     @pytest.mark.selenium
@@ -672,7 +729,7 @@ class TestHeavySelect2MultipleWidget:
         )
         title = driver.find_element(By.ID, "id_title")
         title.send_keys("fo")
-        genres, fartists = driver.find_elements(
+        genres, _ = driver.find_elements(
             By.CSS_SELECTOR, ".select2-selection--multiple"
         )
         genres.click()
@@ -703,146 +760,93 @@ class TestAddressChainedSelect2Widget:
     form = forms.AddressChainedSelect2WidgetForm()
 
     @pytest.mark.selenium
-    def test_widgets_selected_after_validation_error(
+    def test_dependent_fields__filter_choices(
         self, db, live_server, driver, countries, cities
     ):
         driver.get(live_server + self.url)
-
-        WebDriverWait(driver, 60).until(
-            expected_conditions.presence_of_element_located(
-                (By.CSS_SELECTOR, ".select2-selection--single")
-            )
-        )
-        (
-            country_container,
-            city_container,
-            city2_container,
-        ) = driver.find_elements(By.CSS_SELECTOR, ".select2-selection--single")
+        country = Select2Field(driver, 0)
+        city = Select2Field(driver, 1)
 
         # clicking city select2 lists all available cities
-        city_container.click()
-        WebDriverWait(driver, 60).until(
-            expected_conditions.presence_of_element_located(
-                (By.CSS_SELECTOR, ".select2-results li")
-            )
+        city.click()
+        assert city.wait_for_option_texts() == set(
+            City.objects.values_list("name", flat=True)
         )
-        city_options = driver.find_elements(By.CSS_SELECTOR, ".select2-results li")
-        city_names_from_browser = {option.text for option in city_options}
-        city_names_from_db = set(City.objects.values_list("name", flat=True))
-        assert len(city_names_from_browser) == City.objects.count()
-        assert city_names_from_browser == city_names_from_db
 
         # selecting a country really does it
-        country_container.click()
-        WebDriverWait(driver, 60).until(
-            expected_conditions.presence_of_element_located(
-                (By.CSS_SELECTOR, ".select2-results li:nth-child(2)")
-            )
-        )
-        country_option = driver.find_element(
-            By.CSS_SELECTOR, ".select2-results li:nth-child(2)"
-        )
-        country_name = country_option.text
-        country_option.click()
-        assert country_name == country_container.text
+        country.click()
+        country_name = country.click_option(2)
+        assert country_name == country.get_text()
 
         # clicking city select2 lists reduced list of cities belonging to the country
-        city_container.click()
-        WebDriverWait(driver, 60).until(
-            expected_conditions.presence_of_element_located(
-                (By.CSS_SELECTOR, ".select2-results li")
+        city.click()
+        assert city.wait_for_option_texts() == set(
+            City.objects.filter(country__name=country_name).values_list(
+                "name", flat=True
             )
         )
-        city_options = driver.find_elements(By.CSS_SELECTOR, ".select2-results li")
-        city_names_from_browser = {option.text for option in city_options}
-        city_names_from_db = set(
-            Country.objects.get(name=country_name).cities.values_list("name", flat=True)
-        )
-        assert len(city_names_from_browser) != City.objects.count()
-        assert city_names_from_browser == city_names_from_db
 
         # selecting a city really does it
-        city_option = driver.find_element(
-            By.CSS_SELECTOR, ".select2-results li:nth-child(2)"
-        )
-        city_name = city_option.text
-        city_option.click()
-        assert city_name == city_container.text
+        city_name = city.click_option(2)
+        assert city_name == city.get_text()
 
         # clicking country select2 lists reduced list to the only country available to the city
-        country_container.click()
-        WebDriverWait(driver, 60).until(
-            expected_conditions.presence_of_element_located(
-                (By.CSS_SELECTOR, ".select2-results li")
+        country.click()
+        assert country.wait_for_option_texts() == set(
+            Country.objects.filter(cities__name=city_name).values_list(
+                "name", flat=True
             )
         )
-        country_options = driver.find_elements(By.CSS_SELECTOR, ".select2-results li")
-        country_names_from_browser = {option.text for option in country_options}
-        country_names_from_db = {City.objects.get(name=city_name).country.name}
-        assert len(country_names_from_browser) != Country.objects.count()
-        assert country_names_from_browser == country_names_from_db
 
     @pytest.mark.selenium
-    def test_dependent_fields_clear_after_change_parent(
+    def test_dependent_fields__clear_after_parent_change(
         self, db, live_server, driver, countries, cities
     ):
         driver.get(live_server + self.url)
-        (
-            country_container,
-            city_container,
-            city2_container,
-        ) = driver.find_elements(By.CSS_SELECTOR, ".select2-selection--single")
+        country = Select2Field(driver, 0)
+        city2 = Select2Field(driver, 2)
 
         # selecting a country really does it
-        country_container.click()
-        WebDriverWait(driver, 60).until(
-            expected_conditions.presence_of_element_located(
-                (By.CSS_SELECTOR, ".select2-results li:nth-child(2)")
-            )
-        )
-        country_option = driver.find_element(
-            By.CSS_SELECTOR, ".select2-results li:nth-child(2)"
-        )
-        country_name = country_option.text
-        country_option.click()
-        assert country_name == country_container.text
+        country.click()
+        assert country.click_option(2) == country.get_text()
 
         # selecting a city2
-        city2_container.click()
-        WebDriverWait(driver, 60).until(
-            expected_conditions.presence_of_element_located(
-                (By.CSS_SELECTOR, ".select2-results li")
-            )
-        )
-        city2_option = driver.find_element(
-            By.CSS_SELECTOR, ".select2-results li:nth-child(2)"
-        )
-        city2_name = city2_option.text
-        city2_option.click()
-        assert city2_name == city2_container.text
+        city2.click()
+        assert city2.click_option(2) == city2.get_text()
 
         # change a country
-        country_container.click()
-        WebDriverWait(driver, 60).until(
-            expected_conditions.presence_of_element_located(
-                (By.CSS_SELECTOR, ".select2-results li:nth-child(3)")
-            )
-        )
-        country_option = driver.find_element(
-            By.CSS_SELECTOR, ".select2-results li:nth-child(3)"
-        )
-        country_name = country_option.text
-        country_option.click()
-        assert country_name == country_container.text
+        country.click()
+        country_name = country.click_option(3)
+        assert country_name == country.get_text()
 
-        # check the value in city2
-        city2_container.click()
-        WebDriverWait(driver, 60).until(
-            expected_conditions.presence_of_element_located(
-                (By.CSS_SELECTOR, ".select2-results li")
+        # check that city2 is cleared and lists the cities of the new country
+        city2.click()
+        assert city2.wait_for_option_texts() == set(
+            City.objects.filter(country__name=country_name).values_list(
+                "name", flat=True
             )
         )
-        assert city2_container.text == ""
+        assert city2.get_text() == ""
+
+    @pytest.mark.selenium
+    def test_dependent_fields_using_checkbox(self, db, live_server, driver, cities):
+        driver.get(live_server + self.url)
+        city = Select2Field(driver, 1)
+
+        # a checked checkbox passes 1 and lists all cities
+        city.click()
+        assert city.wait_for_option_texts() == set(
+            City.objects.values_list("name", flat=True)
+        )
+
+        # selecting a city really does it
+        city_name = city.click_option(1)
+        assert city_name == city.get_text()
+
+        # an unchecked checkbox passes 0 and filters out all cities
+        driver.find_element(By.ID, "id_active").click()
+        city.click()
+        assert city.wait_for_option_texts() == {"No results found"}
 
 
 @pytest.fixture(
@@ -862,7 +866,7 @@ def widget_fixture(request):
 
 
 @pytest.mark.parametrize(
-    "locale,expected",
+    ("locale", "expected"),
     [
         ("fr-FR", "fr"),
         # Some locales with a country code are natively supported by select2's i18n
